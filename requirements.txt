@@ -1,0 +1,8 @@
+crayons
+h5py
+numba
+numpy
+pandas
+pyart
+pyhdf
+pyproj
