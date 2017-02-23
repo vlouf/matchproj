@@ -1,52 +1,47 @@
-"""
-################################################################################
+# Serious business is done here.
 
-                                      MSGR
-                      Matching Satellite and Ground Radar
-
-@author: Valentin Louf (from an original IDL code of Rob Warren)
-@version: 0.4
-@date: 2016-12-06 (creation) 2017-1-24 (current version)
-@email: valentin.louf@bom.gov.au
-@company: Monash University/Bureau of Meteorology
-TODO: see read_radar.py. Surendra had problem here. We had to comment the
-try/except and remove the io.read above just to keep the aux_io below. Need to
-inverstigate what is going on with odim HDF5 file.
-################################################################################
-"""
-
-import glob
-import pyart
-import pyproj  # For cartographic transformations and geodetic computations
 import datetime
 import warnings
-import configparser
 import numpy as np
-import pandas as pd
 import itertools
 from numpy import sqrt, cos, sin, pi, exp
-from multiprocessing import Pool
 
 # Custom modules
-from MSGR import reflectivity_conversion
-from MSGR.io.read_gpm import read_gpm
-from MSGR.io.read_trmm import read_trmm
-from MSGR.io.read_radar import read_radar
-from MSGR.io.save_data import save_data
-from MSGR.instruments.ground_radar import radar_gaussian_curve # functions related to the ground radar data
-from MSGR.instruments.satellite import get_orbit_number, satellite_params, correct_parallax    # functions related to the satellite data
-from MSGR.util_fun import * # bunch of useful functions
+from . import reflectivity_conversion
+
+from .util_fun import * # bunch of useful functions
+from .io.read_gpm import read_gpm
+from .io.read_trmm import read_trmm
+from .io.read_radar import read_radar
+from .instruments.satellite import correct_parallax    # functions related to the satellite data
 
 
-def matchproj_fun(the_file, file_2A25_trmm=None, dtime=None):
+def matchproj_fun(PATH_params, PROJ_params, RADAR_params, SAT_params,
+                  SWITCH_params, THRESHOLDS_params, sat_file_1,
+                  sat_file_2A25_trmm=None, dtime=None):
     '''
     MATCHPROJ_FUN
 
     Parameters
     ==========
-        the_file:
+        PATH_params: dict
+            Dictionnary containing paths information.
+        PROJ_params: dict
+            Dictionnary containing map projection information.
+        RADAR_params: dict
+            Dictionnary containing the ground radar parameters.
+        SAT_params: dict
+            Dictionnary containing the satellite radar parameters.
+        SWITCH_params: dict
+            Dictionnary containing the information about different switches,
+            i.e. DBZ statistics or natural units, attenuation correction,
+            ground radar is C-Band, or satellite is GPM.
+        THRESHOLDS_params: dict
+            Dictionnary containing
+
+        sat_file_1:
             Satellite data filename (just one file for GPM, or 2A23 for TRMM).
-        file_2A25_trmm:
+        sat_file_2A25_trmm:
             Second satellite file (TRMM only).
         dtime: dateime
             Date of the day of comparison.
@@ -57,15 +52,45 @@ def matchproj_fun(the_file, file_2A25_trmm=None, dtime=None):
             A dictionnary structure containing the comparable reflectivities.
     '''
 
+    raddir = PATH_params['raddir']
+
+    earth_gaussian_radius = PROJ_params['earth_gaussian_radius']
+    smap = PROJ_params['smap']
+
+    xmin = RADAR_params['xmin']
+    xmax = RADAR_params['xmax']
+    ymin = RADAR_params['ymin']
+    ymax = RADAR_params['ymax']
+    rmin = RADAR_params['rmin']
+    rmax = RADAR_params['rmax']
+    z0 = RADAR_params['z0']
+    bwr = RADAR_params['bwr']
+    gr_reflectivity_offset = RADAR_params['gr_reflectivity_offset']
+
+    zt = SAT_params['zt']
+    drt = SAT_params['drt']
+    bwt = SAT_params['bwt']
+
+    l_cband = SWITCH_params['l_cband']
+    l_dbz = SWITCH_params['l_dbz']
+    l_gpm = SWITCH_params['l_gpm']
+    l_atten = SWITCH_params['l_atten']
+
+    minprof = THRESHOLDS_params['minprof']
+    maxdt = THRESHOLDS_params['maxdt']
+    minrefg = THRESHOLDS_params['minrefg']
+    minrefp = THRESHOLDS_params['minrefp']
+    minpair = THRESHOLDS_params['minpair']
+
     julday = dtime
     if l_gpm:
-        sat = read_gpm(the_file)
-        txt = 'READING ' + the_file
+        sat = read_gpm(sat_file_1)
+        txt = 'READING ' + sat_file_1
         print_with_time(txt)
     else:
-        sat = read_trmm(the_file, file_2A25_trmm)
-        print_with_time("READING " + the_file)
-        print_with_time("READING " + file_2A25_trmm)
+        sat = read_trmm(sat_file_1, sat_file_2A25_trmm)
+        print_with_time("READING " + sat_file_1)
+        print_with_time("READING " + sat_file_2A25_trmm)
 
     if sat is None:
         print_red('Bad satellite data')
@@ -85,7 +110,6 @@ def matchproj_fun(the_file, file_2A25_trmm=None, dtime=None):
                               (yp >= ymin) & (yp <= ymax))
 
     if len(ioverx) == 0:
-        nerr[1] += 1
         print_red("Insufficient satellite rays in domain for " + julday.strftime("%d %b %Y"))
         return None
 
@@ -141,7 +165,6 @@ def matchproj_fun(the_file, file_2A25_trmm=None, dtime=None):
     iscan, iray = np.where((d >= rmin) & (d <= rmax) & (pflag == 2))
     nprof = len(iscan)
     if nprof < minprof:
-        nerr[2] += 1
         print_red('Insufficient precipitating satellite rays in domain %i.' % (nprof))
         return None
 
@@ -200,7 +223,6 @@ def matchproj_fun(the_file, file_2A25_trmm=None, dtime=None):
         zbb = np.median(zbb[ibb])
         bbwidth = np.median(bbwidth[ibb])
     else:
-        nerr[3] += 1
         print_red('Insufficient bright band rays %i for ' % (nbb) +
                   julday.strftime("%d %b %Y"))
         return None
@@ -249,7 +271,6 @@ def matchproj_fun(the_file, file_2A25_trmm=None, dtime=None):
         print_red('Time difference is of %i s.' % (time_difference.seconds), bold=True)
         print_red('This time difference is bigger' +
               ' than the acceptable value of %i s.' % (maxdt))
-        nerr[5] += 1
         return None  # To the next satellite file
 
     # Radar file corresponding to the nearest scan time
@@ -257,7 +278,7 @@ def matchproj_fun(the_file, file_2A25_trmm=None, dtime=None):
     time = closest_dtime_rad  # Keeping the IDL program notation
 
     print_with_time('READING ' + radfile)
-    radar = read_radar(radfile, l_atten)
+    radar = read_radar(radfile, l_atten, gr_reflectivity_offset)
 
     if radar is None:
         return None  # Bad dimensions message already printed
@@ -272,7 +293,9 @@ def matchproj_fun(the_file, file_2A25_trmm=None, dtime=None):
     dr = radar['dr']
     reflectivity_ground_radar = radar['reflec']
 
-    reflectivity_ground_radar[reflectivity_ground_radar < minrefg] = np.NaN
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        reflectivity_ground_radar[reflectivity_ground_radar < 10] = np.NaN
 
     # Determine the Cartesian coordinates of the ground radar's pixels
     # rg, ag, eg = np.meshgrid(r_range, azang, elang, indexing='ij')
@@ -384,9 +407,10 @@ def matchproj_fun(the_file, file_2A25_trmm=None, dtime=None):
 
             # Average over those bins that exceed the reflectivity
             # threshold (linear average)
+
             ref1[ii, jj] = np.nanmean(refp1)
-            ref2[ii, jj] = np.nanmean(refp2)
-            ref3[ii, jj] = np.nanmean(refp3)
+            ref3[ii, jj] = np.nanmean(refp2)
+            ref4[ii, jj] = np.nanmean(refp3)
             iref1[ii, jj] = np.nanmean(irefp1)
 
             if not l_dbz:
@@ -425,6 +449,10 @@ def matchproj_fun(the_file, file_2A25_trmm=None, dtime=None):
             w = w*refg1/refg2
 
             ref2[ii, jj] = np.nansum(w*refg1)/np.nansum(w)
+
+            # if ref2[ii, jj] < minrefp:
+            #     ref2[ii, jj] = np.NaN
+
             ref5[ii, jj] = np.nansum(w*refg2)/np.nansum(w)
             iref2[ii, jj] = np.nansum(w*irefg1)/np.nansum(w)
 
@@ -446,6 +474,7 @@ def matchproj_fun(the_file, file_2A25_trmm=None, dtime=None):
     # Convert back to dBZ
     iref1 = 10*np.log10(iref1)
     iref2 = 10*np.log10(iref2)
+
     if not l_dbz:
         reflectivity_satellite = 10*np.log10(reflectivity_satellite)
         reflectivity_ground_radar = 10*np.log10(reflectivity_ground_radar)
@@ -458,12 +487,15 @@ def matchproj_fun(the_file, file_2A25_trmm=None, dtime=None):
         ref4 = 10*np.log10(ref4)
         ref5 = 10*np.log10(ref5)
 
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        ref2[ref2 < minrefg] = np.NaN
+
     # Extract comparison pairs
     ipairx, ipairy = np.where((~np.isnan(ref1)) & (~np.isnan(ref2)))
     if len(ipairx) < minpair:
-        nerr[7] += 1
         print_red('Insufficient comparison pairs for ' + julday.strftime("%d %b %Y"))
-        return None
+        return None    
 
     iprof = ipairx
     itilt = ipairy
@@ -507,176 +539,3 @@ def matchproj_fun(the_file, file_2A25_trmm=None, dtime=None):
     match_vol['vol2'] = vol2[ipairx, ipairy]
 
     return match_vol
-
-
-def MAIN_matchproj_fun(the_date):
-    """
-    MAIN_MATCHPROJ_FUN
-    Here we locate the satellite files, call the comparison function
-    matchproj_fun, and send the results for saving.
-
-    Parameters
-    ==========
-        the_date: datetime
-            The day for comparison.
-    """
-
-    # Note the Julian day corresponding to 00 UTC
-    julday = datetime.datetime(the_date.year, the_date.month, the_date.day, 0, 0, 0)
-    date = julday.strftime("%Y%m%d")
-
-    # Note the number of satellite overpasses on this day
-    if l_gpm:
-        satfiles = glob.glob(satdir + '/*' + date + '*.HDF5')
-    else:
-        satfiles = glob.glob(satdir + '/*2A23*' + date + '*.HDF')
-        satfiles2 = glob.glob(satdir + '/*2A25*' + date + '*.HDF')
-
-    if len(satfiles) == 0:
-        print('')  # line break
-        txt = 'No satellite swaths for ' + julday.strftime("%d %b %Y")
-        print_red(txt)
-        nerr[0] += 1
-        return None
-
-    for the_file in satfiles:
-        orbit = get_orbit_number(the_file)
-
-        print('')  # line break
-        print_with_time("Orbit " + orbit + " -- " + julday.strftime("%d %B %Y"))
-
-        if l_gpm:
-            match_vol = matchproj_fun(the_file, dtime=julday)
-        else:
-            try:
-                # Trying to find corresponding 2A25 TRMM file based on the orbit
-                fd_25 = find_file_with_string(satfiles2, orbit)
-            except IndexError:
-                print_red("No matching 2A25 file for TRMM.")
-                continue
-            match_vol = matchproj_fun(the_file, fd_25, dtime=julday)
-
-        if match_vol is None:
-            continue
-
-        # Saving data
-        if l_write:
-            out_name = outdir + "RID_" + rid + "_ORBIT_" + orbit + "_DATE_" + \
-                       julday.strftime("%Y%m%d")
-            txt = "Saving data to " + out_name + \
-                  ". For orbit " + orbit + " on " + julday.strftime("%d %B %Y")
-            print_green(txt, bold=True)
-            save_data(out_name, match_vol)
-
-    return None
-
-
-def main():
-    """
-    MAIN
-    Multiprocessing control room
-    """
-
-    date_range = pd.date_range(start_date, end_date)
-
-    # Chunking the date_range list in order to make it smaller to ingest in
-    # multiprocessing. This allows to clear multiprocessing memory at every
-    # chunks and not going to cray with memory eating. It's just a little trick.
-    if len(date_range) > ncpu*2:
-
-        date_range_chunk = chunks(date_range, ncpu*2)  # Type: Generator
-        for date_range_slice in date_range_chunk:
-            with Pool(ncpu) as pool:
-                date_list = list(date_range_slice)
-                pool.map(MAIN_matchproj_fun, date_list)
-
-    else:
-        with Pool(ncpu) as pool:
-            pool.map(MAIN_matchproj_fun, date_range)
-
-    return None
-
-
-if __name__ == '__main__':
-    """
-    GLOBAL variables declaration
-    Reading configuration file.
-    """
-
-    #  Reading configuration file
-    config = configparser.ConfigParser()
-    config.read('config.ini')
-
-    general = config['general']
-    ncpu = general.getint('ncpu')
-    date1 = general.get('start_date')
-    date2 = general.get('end_date')
-
-    switch = config['switch']
-    l_write = switch.getboolean('write')   # Switch for writing out volume-matched data
-    l_cband = switch.getboolean('cband')   # Switch for C-band GR
-    l_dbz = switch.getboolean('dbz')       # Switch for averaging in dBZ
-    l_gpm = switch.getboolean('gpm')       # Switch for GPM PR data
-    l_atten = switch.getboolean('correct_gr_attenuation')       # Switch for GPM PR data
-
-    path = config['path']
-    raddir = path.get('ground_radar')
-    satdir = path.get('satellite')
-    outdir = path.get('output')
-
-    GR_param = config['radar']
-    radstr = GR_param.get('radar_name')
-    rmin = GR_param.getfloat('rmin')  # minimum GR range (m)
-    rmax = GR_param.getfloat('rmax')  # maximum GR range (m)
-    rid = GR_param.get('radar_id')
-    lon0 = GR_param.getfloat('longitude')
-    lat0 = GR_param.getfloat('latitude')
-    z0 = GR_param.getfloat('altitude')
-    bwr = GR_param.getfloat('beamwidth')
-
-    thresholds = config['thresholds']
-    minprof = thresholds.getint('min_profiles')  # minimum number of PR profiles with precip
-    maxdt = thresholds.getfloat('max_time_delta')   # maximum PR-GR time difference (s)
-    minrefg = thresholds.getfloat('min_gr_reflec')  # minimum GR reflectivity
-    minrefp = thresholds.getfloat('min_sat_reflec')  # minimum PR reflectivity
-    minpair = thresholds.getint('min_pair')  # minimum number of paired samples
-    """ End of the section for user-defined parameters """
-
-    start_date = datetime.datetime.strptime(date1, '%Y%m%d')
-    end_date = datetime.datetime.strptime(date2, '%Y%m%d')
-
-    if l_gpm:
-        SAT_params = satellite_params('gpm')
-    else:
-        SAT_params = satellite_params('trmm')
-
-    zt = SAT_params['zt']
-    drt = SAT_params['drt']
-    bwt = SAT_params['bwt']
-
-    # Initialise error counters
-    nerr = np.zeros((8,), dtype=int)
-
-    # Map Projection
-    # Options: projection transverse mercator, lon and lat of radar, and
-    # ellipsoid WGS84
-    pyproj_config = "+proj=tmerc +lon_0=%f +lat_0=%f +ellps=WGS84" % (lon0, lat0)
-    smap = pyproj.Proj(pyproj_config)
-
-    # Note the lon,lat limits of the domain
-    xmin = -1*rmax
-    xmax = rmax
-    ymin = -1*rmax
-    ymax = rmax
-    # lonmin, latmin = smap(xmin, ymin, inverse=True)  # Unused
-    # lonmax, latmax = smap(xmax, ymax, inverse=True)  # Unused
-
-    # Gaussian radius of curvatur for the radar's position
-    earth_gaussian_radius = radar_gaussian_curve(lat0)
-
-    # Printing some information about the global variables and switches
-    welcome_message(l_gpm, l_atten, l_dbz, l_write, outdir, satdir, raddir,
-                    ncpu, start_date, end_date)
-
-    # Serious business starting here.
-    main()
